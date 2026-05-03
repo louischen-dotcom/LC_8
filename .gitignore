@@ -1,4 +1,3 @@
-cat > .gitignore << 'EOF'
 # Python cache files
 __pycache__/
 *.py[cod]
@@ -27,4 +26,7 @@ Thumbs.db
 # Log files
 *.log
 logs/
-EOF
+
+# Pytest cache files
+.pytest_cache/
+pytest-cache-files-*/
