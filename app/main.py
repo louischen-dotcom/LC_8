@@ -1,12 +1,17 @@
 import json
 import logging
+import os
+import secrets
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from dotenv import load_dotenv
 
 from app.model_loader import get_model, load_model
 from app.schemas import (
@@ -19,6 +24,10 @@ from app.schemas import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("credit_scoring_api")
+bearer_scheme = HTTPBearer(auto_error=False)
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(PROJECT_ROOT / ".env")
 
 
 def build_model_frame(application: CreditApplication) -> pd.DataFrame:
@@ -44,6 +53,31 @@ def predict_default_probability(model, model_frame: pd.DataFrame) -> tuple[int, 
     predictions = model.predict(model_frame)
     prediction = int(predictions[0])
     return prediction, float(prediction)
+
+
+def verify_api_token(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> None:
+    expected_token = os.environ.get("API_TOKEN")
+    if not expected_token:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="API_TOKEN is not configured",
+        )
+
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if not secrets.compare_digest(credentials.credentials, expected_token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 @asynccontextmanager
@@ -85,7 +119,11 @@ async def exposed_features() -> list[str]:
     return list(CreditApplication.exposed_feature_names())
 
 
-@app.post("/predict", response_model=PredictionResponse)
+@app.post(
+    "/predict",
+    response_model=PredictionResponse,
+    dependencies=[Depends(verify_api_token)],
+)
 async def predict(application: CreditApplication) -> PredictionResponse:
     start_time = time.perf_counter()
 
