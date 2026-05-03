@@ -27,6 +27,9 @@ Thumbs.db
 *.log
 logs/
 
+# Local MLflow runtime files
+mlflow.db
+
 # Pytest cache files
 .pytest_cache/
 pytest-cache-files-*/
