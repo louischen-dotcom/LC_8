@@ -18,7 +18,7 @@ def _default_local_model_path() -> Path:
 
 
 def load_model() -> Any:
-    """Load the model once, preferring MLflow Registry with a local fallback."""
+    """Load the model once, using LOCAL_MODEL_URI or MLflow Registry fallback."""
     global _model
 
     if _model is not None:
@@ -34,6 +34,17 @@ def load_model() -> Any:
 
     mlflow.set_tracking_uri(mlflow_tracking_uri)
     registry_model_uri = f"models:/{model_name}/{model_version}"
+
+    if local_model_uri:
+        try:
+            _model = mlflow.lightgbm.load_model(local_model_uri)
+            print(f"Model loaded from local MLflow artifact: {local_model_uri}")
+            return _model
+        except Exception as local_error:
+            raise RuntimeError(
+                f"Failed to load model from LOCAL_MODEL_URI '{local_model_uri}'. "
+                f"Error: {local_error}"
+            ) from local_error
 
     try:
         _model = mlflow.lightgbm.load_model(registry_model_uri)
