@@ -37,22 +37,56 @@ jobs:
   deploy:
     needs: test
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: >
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.deploy))
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Push to Hugging Face Space
+      - name: Install Git LFS and Xet
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-lfs unzip
+
+          git lfs install
+
+          curl --proto '=https' --tlsv1.2 -sSf \
+            https://raw.githubusercontent.com/huggingface/xet-core/refs/heads/main/git_xet/install.sh \
+            | sh
+
+          git xet --version
+
+      - name: Deploy to Hugging Face Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_USER_SPACE_NAME: ${{ secrets.HF_USER_SPACE_NAME }}
         run: |
           test -n "$HF_TOKEN" || (echo "Missing GitHub secret HF_TOKEN" && exit 1)
           test -n "$HF_USER_SPACE_NAME" || (echo "Missing GitHub secret HF_USER_SPACE_NAME" && exit 1)
+
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote add hf https://token:${HF_TOKEN}@huggingface.co/spaces/${HF_USER_SPACE_NAME}
-          git push hf HEAD:main --force
+
+          git clone https://token:${HF_TOKEN}@huggingface.co/spaces/${HF_USER_SPACE_NAME} "$RUNNER_TEMP/hf-space"
+
+          rsync -av --delete ./ "$RUNNER_TEMP/hf-space/" \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude ".venv" \
+            --exclude ".uv-cache" \
+            --exclude ".pytest_cache" \
+            --exclude "__pycache__"
+
+          cd "$RUNNER_TEMP/hf-space"
+
+          git lfs track "*.pkl"
+          git lfs track "*.db"
+          git lfs track "*.png"
+
+          git add .
+          git diff --cached --quiet && echo "No changes to deploy" && exit 0
+
+          git commit -m "Deploy API from GitHub Actions"
+          git push origin main
