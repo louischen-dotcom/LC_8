@@ -2,9 +2,9 @@ from fastapi.testclient import TestClient
 
 from app import main as api
 from app.schemas import MODEL_FEATURES, TOP_SHAP_FEATURES
-
+import pandas as pd
 import logging
-
+from app.drift_monitor import DriftMonitor
 
 AUTH_HEADER = {"Authorization": "Bearer test-token"}
 
@@ -17,6 +17,24 @@ class FakeModel:
         self.last_frame = model_frame
         return [[0.2, 0.8]]
 
+def build_test_monitor(batch_size=2):
+    test_monitor = DriftMonitor.__new__(DriftMonitor)
+    test_monitor.batch_size = batch_size
+    test_monitor.drift_threshold = 0.05
+    test_monitor.prediction_buffer = []
+    test_monitor.logger = logging.getLogger("drift_monitor")
+
+    test_monitor.reference_data = pd.DataFrame([
+        {
+            "EXT_SOURCE_MEAN": 0.5,
+            "AMT_CREDIT": 200000,
+            "AMT_INCOME_TOTAL": 150000,
+            "DAYS_BIRTH": -15000,
+            "DAYS_EMPLOYED": -3000,
+        }
+    ])
+
+    return test_monitor
 
 def test_health_reports_loaded_model(monkeypatch):
     fake_model = FakeModel()
@@ -143,12 +161,8 @@ def test_drift_monitor_triggers(monkeypatch):
     monkeypatch.setattr(api, "get_model", lambda: fake_model)
 
     # 🔥 Replace drift monitor with small batch size
-    from app.drift_monitor import DriftMonitor
-
-    test_monitor = DriftMonitor(
-        reference_data_path="data/processed/train_final.csv",
-        batch_size=3  # small for test
-    )
+    # from app.drift_monitor import DriftMonitor
+    test_monitor = build_test_monitor(batch_size=3)
 
     monkeypatch.setattr(api, "drift_monitor", test_monitor)
 
@@ -164,11 +178,19 @@ def test_drift_monitor_logs(monkeypatch, caplog):
     monkeypatch.setattr(api, "load_model", lambda: fake_model)
     monkeypatch.setattr(api, "get_model", lambda: fake_model)
 
-    from app.drift_monitor import DriftMonitor
-    test_monitor = DriftMonitor(
-        reference_data_path="data/processed/train_final.csv",
-        batch_size=2
-    )
+    # from app.drift_monitor import DriftMonitor
+    test_monitor = build_test_monitor(batch_size=2)
+
+    # Fake reference data
+    test_monitor.reference_data = pd.DataFrame([
+        {
+            "EXT_SOURCE_MEAN": 0.5,
+            "AMT_CREDIT": 200000,
+            "AMT_INCOME_TOTAL": 150000,
+            "DAYS_BIRTH": -15000,
+            "DAYS_EMPLOYED": -3000,
+        }
+    ])
 
     monkeypatch.setattr(api, "drift_monitor", test_monitor)
 
