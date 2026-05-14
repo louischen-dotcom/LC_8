@@ -23,7 +23,7 @@ from app.schemas import (
 
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("credit_scoring_api")
+logger = logging.getLogger("lc-8_credit_scoring_api")
 bearer_scheme = HTTPBearer(auto_error=False)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
