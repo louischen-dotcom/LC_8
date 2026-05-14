@@ -1,3 +1,4 @@
+# /app/main.py
 import json
 import logging
 import os
@@ -6,7 +7,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 import pandas as pd
 from fastapi import Depends, FastAPI, HTTPException, status
@@ -20,14 +21,20 @@ from app.schemas import (
     MODEL_FEATURES,
     PredictionResponse,
 )
+from app.drift_monitor import DriftMonitor
+from monitoring.logger import setup_production_logger
 
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("lc-8_credit_scoring_api")
+# logging.basicConfig(level=logging.INFO)
+# logger = logging.getLogger("lc-8_credit_scoring_api")
+logger = setup_production_logger("lc-8_credit_scoring_api")
 bearer_scheme = HTTPBearer(auto_error=False)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(PROJECT_ROOT / ".env")
+
+# Global drift monitor instance
+drift_monitor: Optional[DriftMonitor] = None
 
 
 def build_model_frame(application: CreditApplication) -> pd.DataFrame:
@@ -82,9 +89,19 @@ def verify_api_token(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global drift_monitor
     logger.info("Starting up - loading model")
     load_model()
     logger.info("Model loaded")
+
+    # Initialize drift monitoring
+    try:
+        reference_data_path = PROJECT_ROOT / "data" / "processed" / "train_final.csv"
+        drift_monitor = DriftMonitor(str(reference_data_path))
+        logger.info("Drift monitoring initialized")
+    except Exception as e:
+        logger.warning(f"Failed to initialize drift monitoring: {e}")
+
     yield
     logger.info("Shutting down")
 
@@ -109,9 +126,14 @@ async def root() -> dict[str, str]:
 async def health_check() -> HealthResponse:
     try:
         get_model()
+        model_loaded = True
     except RuntimeError:
-        return HealthResponse(status="unhealthy", model_loaded=False)
-    return HealthResponse(status="healthy", model_loaded=True)
+        model_loaded = False
+
+    return HealthResponse(
+        status="healthy" if model_loaded else "unhealthy",
+        model_loaded=model_loaded,
+    )
 
 
 @app.get("/features", response_model=list[str])
@@ -158,6 +180,15 @@ async def predict(application: CreditApplication) -> PredictionResponse:
                 }
             )
         )
+
+        # Add to drift monitoring
+        if drift_monitor:
+            drift_monitor.add_prediction({
+                **application.model_dump(),
+                "prediction": prediction,
+                "probability_of_default": probability,
+                "risk_category": category
+            })
 
         return response
     except HTTPException:

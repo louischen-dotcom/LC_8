@@ -23,6 +23,86 @@ automatically filled with the training medians before inference.
 - Automated tests with `pytest`.
 - Dockerized API runtime.
 - GitHub Actions pipeline for testing and deployment to Hugging Face Spaces.
+- Real-time data drift monitoring with batch-based detection.
+- Structured logging of predictions (inputs, outputs, latency).
+
+## Monitoring & Drift Detection
+
+The API includes a monitoring system to track both data drift and operational performance.
+
+### Logging
+
+Each prediction request is logged as structured JSON containing:
+- input features (top SHAP features)
+- model outputs (prediction, probability, risk category)
+- inference time (latency)
+
+Logs are stored locally in rotating files:
+```text
+logs/predictions.log
+```
+
+### Drift Detection
+
+A drift monitoring component is integrated into the API:
+
+- predictions are buffered in memory;
+- drift analysis is triggered every N requests (batch size, default = 100);
+- production data is compared to reference (training) data.
+
+Drift detection uses:
+- Evidently (if available)
+- Kolmogorov–Smirnov test (fallback)
+
+### Drift Logs
+
+When drift analysis runs, logs are generated:
+
+```json
+{
+  "event": "drift_analysis_completed",
+  "drift_detected": true,
+  "drifted_features": 2
+}
+```
+
+If drift is detected at feature level:
+
+```json
+{
+  "event": "feature_drift_detected",
+  "feature": "AMT_CREDIT"
+}
+```
+### Purpose
+
+This monitoring system allows:
+
+- early detection of data distribution shifts;
+- identification of impacted features;
+- triggering of corrective actions (performance check, retraining).
+
+In production, these logs can be integrated into monitoring tools such as ELK or Grafana.
+
+### Validation
+
+The monitoring system is validated through automated tests that simulate API calls and verify that drift detection is triggered once the batch size threshold is reached.
+
+## Architecture
+
+The system follows a production-oriented MLOps design:
+
+Client → API → Model
+↓
+Logging → Drift Monitor
+
+- The API serves predictions using a preloaded model.
+- Each request is logged (inputs, outputs, latency).
+- A drift monitor collects predictions and performs periodic analysis.
+- Drift detection results are logged for monitoring and alerting.
+
+This design simulates a real-world ML monitoring pipeline.
+
 
 ## Requirements
 
@@ -48,11 +128,11 @@ uv run pytest tests/ -v
 
 The test suite covers:
 
-- the API contract;
-- model loading;
-- model feature consistency;
-- input validation;
-- authentication errors.
+- API contract and endpoints;
+- authentication and error handling;
+- model inference and feature consistency;
+- drift monitoring trigger (batch-based detection);
+- logging behavior.
 
 ## Run the API Locally
 

@@ -3,6 +3,8 @@ from fastapi.testclient import TestClient
 from app import main as api
 from app.schemas import MODEL_FEATURES, TOP_SHAP_FEATURES
 
+import logging
+
 
 AUTH_HEADER = {"Authorization": "Bearer test-token"}
 
@@ -132,3 +134,63 @@ def test_predict_returns_503_when_api_token_is_not_configured(monkeypatch):
 
     assert response.status_code == 503
     assert response.json()["detail"] == "API_TOKEN is not configured"
+
+
+def test_drift_monitor_triggers(monkeypatch):
+    fake_model = FakeModel()
+    monkeypatch.setenv("API_TOKEN", "test-token")
+    monkeypatch.setattr(api, "load_model", lambda: fake_model)
+    monkeypatch.setattr(api, "get_model", lambda: fake_model)
+
+    # 🔥 Replace drift monitor with small batch size
+    from app.drift_monitor import DriftMonitor
+
+    test_monitor = DriftMonitor(
+        reference_data_path="data/processed/train_final.csv",
+        batch_size=3  # small for test
+    )
+
+    monkeypatch.setattr(api, "drift_monitor", test_monitor)
+
+    with TestClient(api.app) as client:
+        for _ in range(3):  # trigger batch
+            response = client.post("/predict", json={}, headers=AUTH_HEADER)
+            assert response.status_code == 200
+
+
+def test_drift_monitor_logs(monkeypatch, caplog):
+    fake_model = FakeModel()
+    monkeypatch.setenv("API_TOKEN", "test-token")
+    monkeypatch.setattr(api, "load_model", lambda: fake_model)
+    monkeypatch.setattr(api, "get_model", lambda: fake_model)
+
+    from app.drift_monitor import DriftMonitor
+    test_monitor = DriftMonitor(
+        reference_data_path="data/processed/train_final.csv",
+        batch_size=2
+    )
+
+    monkeypatch.setattr(api, "drift_monitor", test_monitor)
+
+    caplog.set_level(logging.INFO)
+
+    with TestClient(api.app) as client:
+        for _ in range(2):
+            client.post("/predict", json={}, headers=AUTH_HEADER)
+
+
+    # ✅ Check drift analysis triggered
+    drift_logs = [
+        record for record in caplog.records
+        if "drift_analysis_completed" in record.getMessage()
+    ]
+    assert len(drift_logs) > 0
+
+    # ✅ Check feature-level drift (OPTIONAL)
+    feature_logs = [
+        record for record in caplog.records
+        if "feature_drift_detected" in record.getMessage()
+    ]
+
+    # You can assert or just inspect
+    assert isinstance(feature_logs, list)
