@@ -23,6 +23,7 @@ from app.schemas import (
 )
 from app.drift_monitor import DriftMonitor
 from monitoring.logger import setup_production_logger
+from monitoring.prediction_store import PredictionStore, get_prediction_store
 
 
 # logging.basicConfig(level=logging.INFO)
@@ -35,6 +36,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 # Global drift monitor instance
 drift_monitor: Optional[DriftMonitor] = None
+prediction_store: Optional[PredictionStore] = None
 
 
 def build_model_frame(application: CreditApplication) -> pd.DataFrame:
@@ -89,20 +91,38 @@ def verify_api_token(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global drift_monitor
+    global drift_monitor, prediction_store
+    created_drift_monitor = False
     logger.info("Starting up - loading model")
     load_model()
     logger.info("Model loaded")
 
+    prediction_store = get_prediction_store()
+    logger.info(f"Monitoring store backend: {prediction_store.backend_name}")
+
     # Initialize drift monitoring
     try:
-        reference_data_path = PROJECT_ROOT / "data" / "processed" / "train_final.csv"
-        drift_monitor = DriftMonitor(str(reference_data_path))
-        logger.info("Drift monitoring initialized")
+        if drift_monitor is None:
+            reference_data_path = PROJECT_ROOT / "data" / "processed" / "train_final.csv"
+            drift_monitor = DriftMonitor(
+                str(reference_data_path),
+                prediction_store=prediction_store,
+            )
+            created_drift_monitor = True
+            logger.info("Drift monitoring initialized")
+        else:
+            if getattr(drift_monitor, "prediction_store", None) is None:
+                drift_monitor.prediction_store = prediction_store
+            logger.info("Using existing drift monitor")
     except Exception as e:
         logger.warning(f"Failed to initialize drift monitoring: {e}")
 
     yield
+    if created_drift_monitor:
+        drift_monitor = None
+    if prediction_store:
+        prediction_store.close()
+        prediction_store = None
     logger.info("Shutting down")
 
 
@@ -148,6 +168,7 @@ async def exposed_features() -> list[str]:
 )
 async def predict(application: CreditApplication) -> PredictionResponse:
     start_time = time.perf_counter()
+    event_timestamp = datetime.now(timezone.utc)
 
     try:
         model = get_model()
@@ -172,7 +193,7 @@ async def predict(application: CreditApplication) -> PredictionResponse:
         logger.info(
             json.dumps(
                 {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": event_timestamp.isoformat(),
                     "event": "prediction",
                     "exposed_inputs": application.model_dump(),
                     "outputs": response.model_dump(),
@@ -180,6 +201,20 @@ async def predict(application: CreditApplication) -> PredictionResponse:
                 }
             )
         )
+
+        if prediction_store:
+            try:
+                prediction_store.record_prediction(
+                    timestamp=event_timestamp,
+                    input_data=application.model_dump(),
+                    prediction=prediction,
+                    probability_of_default=probability,
+                    risk_category=category,
+                    inference_time_ms=round(inference_time_ms, 2),
+                    model_version=os.environ.get("MODEL_VERSION"),
+                )
+            except Exception as exc:
+                logger.warning(f"Failed to persist prediction record: {exc}")
 
         # Add to drift monitoring
         if drift_monitor:
@@ -194,16 +229,29 @@ async def predict(application: CreditApplication) -> PredictionResponse:
     except HTTPException:
         raise
     except Exception as exc:
+        inference_time_ms = (time.perf_counter() - start_time) * 1000
         logger.exception(
             json.dumps(
                 {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": event_timestamp.isoformat(),
                     "event": "prediction_error",
                     "error": str(exc),
                     "exposed_inputs": application.model_dump(),
+                    "inference_time_ms": round(inference_time_ms, 2),
                 }
             )
         )
+        if prediction_store:
+            try:
+                prediction_store.record_prediction_error(
+                    timestamp=event_timestamp,
+                    input_data=application.model_dump(),
+                    error=str(exc),
+                    inference_time_ms=round(inference_time_ms, 2),
+                    model_version=os.environ.get("MODEL_VERSION"),
+                )
+            except Exception as persist_exc:
+                logger.warning(f"Failed to persist prediction error record: {persist_exc}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Prediction failed: {exc}",

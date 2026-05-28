@@ -18,6 +18,7 @@ RUN python -m pip install --no-cache-dir uv \
     && uv sync --frozen --no-dev --no-install-project
 
 COPY app ./app
+COPY monitoring ./monitoring
 COPY mlflow/artifacts/models ./mlflow/artifacts/models
 
 EXPOSE 7860

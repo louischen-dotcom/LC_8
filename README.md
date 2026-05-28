@@ -25,6 +25,7 @@ automatically filled with the training medians before inference.
 - GitHub Actions pipeline for testing and deployment to Hugging Face Spaces.
 - Real-time data drift monitoring with batch-based detection.
 - Structured logging of predictions (inputs, outputs, latency).
+- Optional PostgreSQL/Supabase persistence for prediction and drift monitoring.
 
 ## Monitoring & Drift Detection
 
@@ -40,6 +41,23 @@ Each prediction request is logged as structured JSON containing:
 Logs are stored locally in rotating files:
 ```text
 logs/predictions.log
+```
+
+Prediction and drift events can also be persisted to a database for analytics.
+The database layer is optional: if no monitoring database environment variables
+are configured, the API keeps running with file/console logging only.
+
+Two tables are used:
+
+```text
+prediction_logs
+drift_events
+```
+
+The schema is available in:
+
+```text
+monitoring/schema.sql
 ```
 
 ### Drift Detection
@@ -74,19 +92,54 @@ If drift is detected at feature level:
   "feature": "AMT_CREDIT"
 }
 ```
+
+### Operational Anomaly Analysis
+
+The persisted `prediction_logs` table can be analyzed automatically for
+operational issues:
+
+- error rate;
+- average latency;
+- p95 latency;
+- maximum latency.
+
+Run the analysis locally after generating a few prediction records:
+
+```powershell
+$env:DATABASE_URL = "postgresql+psycopg://mlops:mlops@localhost:5432/monitoring"
+uv run python -m monitoring.analyze_operational_metrics
+```
+
+The command outputs a JSON report with status `ok` or `alert`. Thresholds can be
+configured:
+
+```powershell
+uv run python -m monitoring.analyze_operational_metrics `
+  --error-rate-threshold 0.05 `
+  --latency-p95-threshold-ms 1000 `
+  --lookback-hours 24
+```
+
+Use `--fail-on-alert` if the command should return a non-zero exit code when an
+alert is detected.
+
 ### Purpose
 
 This monitoring system allows:
 
 - early detection of data distribution shifts;
 - identification of impacted features;
+- detection of abnormal error rate or prediction latency;
 - triggering of corrective actions (performance check, retraining).
 
-In production, these logs can be integrated into monitoring tools such as ELK or Grafana.
+In production, these logs can be stored in PostgreSQL/Supabase and integrated
+into monitoring tools such as ELK, Grafana, or dashboard notebooks.
 
 ### Validation
 
-The monitoring system is validated through automated tests that simulate API calls and verify that drift detection is triggered once the batch size threshold is reached.
+The monitoring system is validated through automated tests that simulate API
+calls, verify that drift detection is triggered once the batch size threshold is
+reached, and check operational anomaly detection logic.
 
 ## Architecture
 
@@ -98,8 +151,10 @@ Logging → Drift Monitor
 
 - The API serves predictions using a preloaded model.
 - Each request is logged (inputs, outputs, latency).
+- Prediction and drift records can be persisted to PostgreSQL/Supabase.
 - A drift monitor collects predictions and performs periodic analysis.
 - Drift detection results are logged for monitoring and alerting.
+- An operational analysis script detects high error rate and abnormal latency.
 
 This design simulates a real-world ML monitoring pipeline.
 
@@ -136,6 +191,25 @@ The test suite covers:
 
 ## Run the API Locally
 
+Optional: start local PostgreSQL first if you want database persistence.
+
+```powershell
+docker compose up -d postgres
+```
+
+Then set the monitoring database URL:
+
+```powershell
+$env:DATABASE_URL = "postgresql+psycopg://mlops:mlops@localhost:5432/monitoring"
+```
+
+The API auto-creates the monitoring tables by default. To manage the schema
+yourself, run `monitoring/schema.sql` manually and set:
+
+```powershell
+$env:MONITORING_AUTO_CREATE_TABLES = "false"
+```
+
 Terminal 1:
 
 ```powershell
@@ -166,6 +240,12 @@ Interactive documentation is available at:
 
 ```text
 http://127.0.0.1:7860/docs
+```
+
+To inspect persisted predictions locally:
+
+```powershell
+docker compose exec postgres psql -U mlops -d monitoring -c "select id, timestamp, prediction, probability_of_default, risk_category from prediction_logs order by id desc limit 5;"
 ```
 
 ## Endpoints
@@ -265,6 +345,18 @@ Hugging Face Space secret:
 API_TOKEN
 ```
 
+Optional monitoring secrets for Supabase over HTTPS:
+
+```text
+MONITORING_BACKEND=supabase
+SUPABASE_URL
+SUPABASE_SERVICE_ROLE_KEY
+```
+
+Before enabling these, run `monitoring/schema.sql` in the Supabase SQL editor.
+This path uses Supabase's HTTPS REST API, which is safer for Hugging Face Spaces
+than assuming a direct PostgreSQL TCP connection is available.
+
 This token is required by the `/predict` endpoint through the header:
 
 ```text
@@ -280,6 +372,17 @@ Authorization: Bearer <API_TOKEN>
 | `MLFLOW_TRACKING_URI` | Optional MLflow URI for loading the model from a registry. |
 | `MODEL_NAME` | MLflow model name when using the registry. |
 | `MODEL_VERSION` | MLflow model version when using the registry. |
+| `DATABASE_URL` | SQLAlchemy URL for local PostgreSQL or a reachable Postgres database. |
+| `MONITORING_BACKEND` | `auto`, `supabase`, or `disabled`. Defaults to `auto`. |
+| `MONITORING_AUTO_CREATE_TABLES` | Auto-create SQLAlchemy tables when `DATABASE_URL` is set. Defaults to `true`. |
+| `SUPABASE_URL` | Supabase project URL for HTTPS monitoring writes. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Server-side Supabase key for inserting monitoring records. |
+| `SUPABASE_PREDICTION_TABLE` | Optional table override. Defaults to `prediction_logs`. |
+| `SUPABASE_DRIFT_TABLE` | Optional table override. Defaults to `drift_events`. |
+| `OPERATIONAL_LOOKBACK_HOURS` | Lookback window for operational analysis. Defaults to `24`. |
+| `OPERATIONAL_ERROR_RATE_THRESHOLD` | Error-rate alert threshold. Defaults to `0.05`. |
+| `OPERATIONAL_LATENCY_P95_THRESHOLD_MS` | p95 latency alert threshold in ms. Defaults to `1000`. |
+| `OPERATIONAL_MIN_REQUESTS` | Minimum request count before error-rate alerting. Defaults to `1`. |
 
 ## Versioning Notes
 

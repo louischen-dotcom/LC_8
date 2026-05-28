@@ -23,12 +23,19 @@ except ImportError:
 class DriftMonitor:
     """Monitor data drift in production predictions against training data."""
 
-    def __init__(self, reference_data_path: str, batch_size: int = 100, drift_threshold: float = 0.05):
+    def __init__(
+        self,
+        reference_data_path: str,
+        batch_size: int = 100,
+        drift_threshold: float = 0.05,
+        prediction_store: Any | None = None,
+    ):
         self.reference_data_path = Path(reference_data_path)
         self.batch_size = batch_size
         self.drift_threshold = drift_threshold
         self.reference_data: Optional[pd.DataFrame] = None
         self.prediction_buffer: List[Dict[str, Any]] = []
+        self.prediction_store = prediction_store
         self.logger = logging.getLogger("drift_monitor")
 
         # Load reference data on initialization
@@ -87,14 +94,15 @@ class DriftMonitor:
 
             # Overall drift result
             dataset_drift = report_dict['metrics'][0]['result']
-            drift_detected = dataset_drift['dataset_drift']
-            drifted_features = dataset_drift['number_of_drifted_columns']
-            total_features = dataset_drift['number_of_columns']
+            drift_detected = bool(dataset_drift['dataset_drift'])
+            drifted_features = int(dataset_drift['number_of_drifted_columns'])
+            total_features = int(dataset_drift['number_of_columns'])
+            event_timestamp = datetime.now(timezone.utc)
 
             # Log overall result
             self.logger.info(
                 json.dumps({
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": event_timestamp.isoformat(),
                     "event": "drift_analysis_completed",
                     "method": "evidently",
                     "drift_detected": drift_detected,
@@ -103,6 +111,16 @@ class DriftMonitor:
                     "batch_size": len(batch_df)
                 })
             )
+            self._record_drift_event(
+                timestamp=event_timestamp,
+                drift_detected=drift_detected,
+                method="evidently",
+                batch_size=len(batch_df),
+                details={
+                    "drifted_features": drifted_features,
+                    "total_features": total_features,
+                },
+            )
 
             # Log per-feature results for drifted features
             if drift_detected:
@@ -110,15 +128,26 @@ class DriftMonitor:
 
                 for col, info in drift_table['drift_by_columns'].items():
                     if info['drift_detected']:
+                        event_timestamp = datetime.now(timezone.utc)
+                        drift_score = float(info['drift_score'])
                         self.logger.warning(
                             json.dumps({
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "timestamp": event_timestamp.isoformat(),
                                 "event": "feature_drift_detected",
                                 "feature": col,
-                                "drift_score": round(info['drift_score'], 6),
+                                "drift_score": round(drift_score, 6),
                                 "stattest_name": info['stattest_name'],
                                 "method": "evidently"
                             })
+                        )
+                        self._record_drift_event(
+                            timestamp=event_timestamp,
+                            drift_detected=True,
+                            feature=col,
+                            drift_score=drift_score,
+                            method="evidently",
+                            batch_size=len(batch_df),
+                            details={"stattest_name": info.get("stattest_name")},
                         )
 
         except Exception as e:
@@ -141,31 +170,58 @@ class DriftMonitor:
 
                     if len(prod_data) > 10:  # Need minimum sample size
                         ks_stat, p_value = stats.ks_2samp(ref_data, prod_data)
+                        ks_stat_value = float(ks_stat)
+                        p_value_value = float(p_value)
 
-                        if p_value < self.drift_threshold:
+                        if p_value_value < self.drift_threshold:
                             drift_detected = True
+                            event_timestamp = datetime.now(timezone.utc)
                             self.logger.warning(
                                 json.dumps({
-                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    "timestamp": event_timestamp.isoformat(),
                                     "event": "feature_drift_detected",
                                     "feature": feature,
-                                    "ks_statistic": round(ks_stat, 4),
-                                    "p_value": round(p_value, 6),
+                                    "ks_statistic": round(ks_stat_value, 4),
+                                    "p_value": round(p_value_value, 6),
                                     "method": "manual_ks_test"
                                 })
+                            )
+                            self._record_drift_event(
+                                timestamp=event_timestamp,
+                                drift_detected=True,
+                                feature=feature,
+                                p_value=p_value_value,
+                                ks_statistic=ks_stat_value,
+                                method="manual_ks_test",
+                                batch_size=len(batch_df),
                             )
                 except Exception as e:
                     self.logger.error(f"Error checking drift for {feature}: {e}")
 
+        event_timestamp = datetime.now(timezone.utc)
         self.logger.info(
             json.dumps({
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": event_timestamp.isoformat(),
                 "event": "drift_analysis_completed",
                 "method": "manual_ks_test",
                 "drift_detected": drift_detected,
                 "batch_size": len(batch_df)
             })
         )
+        self._record_drift_event(
+            timestamp=event_timestamp,
+            drift_detected=drift_detected,
+            method="manual_ks_test",
+            batch_size=len(batch_df),
+        )
+
+    def _record_drift_event(self, **payload: Any):
+        prediction_store = getattr(self, "prediction_store", None)
+        if prediction_store:
+            try:
+                prediction_store.record_drift_event(**payload)
+            except Exception as exc:
+                self.logger.warning(f"Failed to persist drift event: {exc}")
 
     def get_drift_summary(self) -> Dict[str, Any]:
         """Get current drift monitoring status."""
@@ -174,5 +230,10 @@ class DriftMonitor:
             "buffer_size": len(self.prediction_buffer),
             "batch_size": self.batch_size,
             "drift_threshold": self.drift_threshold,
-            "evidently_available": EVIDENTLY_AVAILABLE
+            "evidently_available": EVIDENTLY_AVAILABLE,
+            "monitoring_store_backend": getattr(
+                getattr(self, "prediction_store", None),
+                "backend_name",
+                None,
+            ),
         }
