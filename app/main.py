@@ -4,16 +4,19 @@ import logging
 import os
 import secrets
 import time
+import warnings
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
+import numpy as np
 import pandas as pd
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from dotenv import load_dotenv
 
+from app.drift_monitor import DriftMonitor
 from app.model_loader import get_model, load_model
 from app.schemas import (
     CreditApplication,
@@ -21,10 +24,8 @@ from app.schemas import (
     MODEL_FEATURES,
     PredictionResponse,
 )
-from app.drift_monitor import DriftMonitor
 from monitoring.logger import setup_production_logger
 from monitoring.prediction_store import PredictionStore, get_prediction_store
-
 
 # logging.basicConfig(level=logging.INFO)
 # logger = logging.getLogger("lc-8_credit_scoring_api")
@@ -44,6 +45,14 @@ def build_model_frame(application: CreditApplication) -> pd.DataFrame:
     return pd.DataFrame([model_input], columns=MODEL_FEATURES)
 
 
+def build_model_array(application: CreditApplication) -> np.ndarray:
+    model_input = application.to_model_input()
+    return np.array(
+        [[model_input[feature] for feature in MODEL_FEATURES]],
+        dtype=np.float32,
+    )
+
+
 def risk_category(probability_of_default: float) -> Literal["Low", "Medium", "High"]:
     if probability_of_default < 0.3:
         return "Low"
@@ -52,14 +61,20 @@ def risk_category(probability_of_default: float) -> Literal["Low", "Medium", "Hi
     return "High"
 
 
-def predict_default_probability(model, model_frame: pd.DataFrame) -> tuple[int, float]:
+def predict_default_probability(model, model_input) -> tuple[int, float]:
     if hasattr(model, "predict_proba"):
-        probabilities = model.predict_proba(model_frame)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="X does not have valid feature names",
+                category=UserWarning,
+            )
+            probabilities = model.predict_proba(model_input)
         probability = float(probabilities[0][1])
         prediction = int(probability >= 0.5)
         return prediction, probability
 
-    predictions = model.predict(model_frame)
+    predictions = model.predict(model_input)
     prediction = int(predictions[0])
     return prediction, float(prediction)
 
@@ -179,8 +194,8 @@ async def predict(application: CreditApplication) -> PredictionResponse:
         ) from exc
 
     try:
-        model_frame = build_model_frame(application)
-        prediction, probability = predict_default_probability(model, model_frame)
+        model_array = build_model_array(application)
+        prediction, probability = predict_default_probability(model, model_array)
         category = risk_category(probability)
         inference_time_ms = (time.perf_counter() - start_time) * 1000
 

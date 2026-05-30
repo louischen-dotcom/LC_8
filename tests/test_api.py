@@ -1,7 +1,8 @@
 from fastapi.testclient import TestClient
 
 from app import main as api
-from app.schemas import MODEL_FEATURES, TOP_SHAP_FEATURES
+from app.schemas import CreditApplication, MODEL_FEATURES, TOP_SHAP_FEATURES
+import numpy as np
 import pandas as pd
 import logging
 from app.drift_monitor import DriftMonitor
@@ -74,8 +75,11 @@ def test_predict_uses_top_features_and_imputes_hidden_features(monkeypatch):
         "probability_of_default": 0.8,
         "risk_category": "High",
     }
-    assert list(fake_model.last_frame.columns) == list(MODEL_FEATURES)
-    assert fake_model.last_frame.shape == (1, 285)
+    expected_input = CreditApplication().to_model_input()
+    expected_values = [expected_input[feature] for feature in MODEL_FEATURES]
+
+    assert fake_model.last_frame.shape == (1, len(MODEL_FEATURES))
+    np.testing.assert_allclose(fake_model.last_frame[0], expected_values)
 
 
 def test_predict_rejects_hidden_model_features(monkeypatch):
