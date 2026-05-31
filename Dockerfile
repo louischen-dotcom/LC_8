@@ -19,6 +19,7 @@ RUN python -m pip install --no-cache-dir uv \
 
 COPY app ./app
 COPY monitoring ./monitoring
+COPY models ./models
 COPY mlflow/artifacts/models ./mlflow/artifacts/models
 
 EXPOSE 7860
