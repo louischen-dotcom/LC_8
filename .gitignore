@@ -27,6 +27,9 @@ Thumbs.db
 *.log
 logs/
 
+# Local profiling and benchmark artifacts
+reports/
+
 # Local MLflow runtime files
 mlflow.db
 
