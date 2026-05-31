@@ -84,6 +84,7 @@ jobs:
           git lfs track "*.pkl"
           git lfs track "*.db"
           git lfs track "*.png"
+          git lfs track "*.onnx"
 
           git add .
           git diff --cached --quiet && echo "No changes to deploy" && exit 0
