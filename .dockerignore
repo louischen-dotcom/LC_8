@@ -12,7 +12,6 @@ data
 notebooks
 tests
 docs
-monitoring
 
 *.log
 logs
