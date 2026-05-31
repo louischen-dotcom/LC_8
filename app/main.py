@@ -26,6 +26,7 @@ from app.schemas import (
 )
 from monitoring.logger import setup_production_logger
 from monitoring.prediction_store import PredictionStore, get_prediction_store
+import onnxruntime as ort
 
 # logging.basicConfig(level=logging.INFO)
 # logger = logging.getLogger("lc-8_credit_scoring_api")
@@ -62,6 +63,15 @@ def risk_category(probability_of_default: float) -> Literal["Low", "Medium", "Hi
 
 
 def predict_default_probability(model, model_input) -> tuple[int, float]:
+    if isinstance(model, ort.InferenceSession):
+        input_name = model.get_inputs()[0].name
+        output_names = [output.name for output in model.get_outputs()]
+        outputs = model.run(output_names, {input_name: model_input})
+
+        prediction = int(outputs[0][0])
+        probability = float(outputs[1][0][1])
+        return prediction, probability
+
     if hasattr(model, "predict_proba"):
         with warnings.catch_warnings():
             warnings.filterwarnings(
@@ -70,6 +80,7 @@ def predict_default_probability(model, model_input) -> tuple[int, float]:
                 category=UserWarning,
             )
             probabilities = model.predict_proba(model_input)
+
         probability = float(probabilities[0][1])
         prediction = int(probability >= 0.5)
         return prediction, probability

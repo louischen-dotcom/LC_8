@@ -20,6 +20,7 @@ automatically filled with the training medians before inference.
 - Token-protected `/predict` endpoint using Bearer authentication.
 - Input validation with Pydantic.
 - Model loaded once at application startup and reused across requests.
+- Optimized ONNX Runtime inference with LightGBM fallback.
 - Automated tests with `pytest`.
 - Dockerized API runtime.
 - GitHub Actions pipeline for testing and deployment to Hugging Face Spaces.
@@ -158,6 +159,38 @@ Logging → Drift Monitor
 
 This design simulates a real-world ML monitoring pipeline.
 
+## Performance Optimization
+
+The inference path was optimized after deployment using monitoring data,
+benchmarking, and `cProfile`.
+
+The first profiling pass showed that the original LightGBM path spent a
+significant part of inference time converting pandas `DataFrame` inputs into
+LightGBM's internal format. The API was first optimized to build ordered NumPy
+arrays directly from validated Pydantic inputs.
+
+ONNX Runtime was then evaluated as a second optimization step. The LightGBM
+model was exported to ONNX with `target_opset=15` and benchmarked against the
+optimized LightGBM NumPy path.
+
+```text
+LightGBM NumPy mean latency: 0.9951 ms
+ONNX Runtime mean latency:   0.0305 ms
+Model hot-path improvement:  96.94%
+Max probability difference:  0.000000131269
+```
+
+ONNX Runtime is now the default inference runtime. LightGBM remains available as
+a fallback with `MODEL_RUNTIME=lightgbm`. The reported improvement applies to
+the model hot path; complete HTTP latency also includes FastAPI, validation,
+logging, drift monitoring, serialization, and network overhead.
+
+The detailed optimization report is available in:
+
+```text
+docs/performance_optimization_report.md
+```
+
 
 ## Requirements
 
@@ -240,6 +273,20 @@ Interactive documentation is available at:
 
 ```text
 http://127.0.0.1:7860/docs
+```
+
+The API uses ONNX Runtime by default for optimized inference. To force the
+LightGBM runtime locally:
+
+```powershell
+$env:MODEL_RUNTIME = "lightgbm"
+uv run uvicorn app.main:app --host 127.0.0.1 --port 7860
+```
+
+To switch back to the default ONNX runtime:
+
+```powershell
+Remove-Item Env:MODEL_RUNTIME
 ```
 
 To inspect persisted predictions locally:
@@ -372,6 +419,8 @@ Authorization: Bearer <API_TOKEN>
 | `MLFLOW_TRACKING_URI` | Optional MLflow URI for loading the model from a registry. |
 | `MODEL_NAME` | MLflow model name when using the registry. |
 | `MODEL_VERSION` | MLflow model version when using the registry. |
+| `MODEL_RUNTIME` | Inference runtime: `onnx` or `lightgbm`. Defaults to `onnx`. |
+| `ONNX_MODEL_PATH` | Optional path to the ONNX model. Defaults to `models/onnx/home_credit_lightgbm.onnx`. |
 | `DATABASE_URL` | SQLAlchemy URL for local PostgreSQL or a reachable Postgres database. |
 | `MONITORING_BACKEND` | `auto`, `supabase`, or `disabled`. Defaults to `auto`. |
 | `MONITORING_AUTO_CREATE_TABLES` | Auto-create SQLAlchemy tables when `DATABASE_URL` is set. Defaults to `true`. |
