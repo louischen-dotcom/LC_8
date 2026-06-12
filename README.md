@@ -226,15 +226,18 @@ The test suite covers:
 
 Optional: start local PostgreSQL first if you want database persistence.
 
+Full local sequence with monitoring persistence enabled:
+
 ```powershell
 docker compose up -d postgres
-```
-
-Then set the monitoring database URL:
-
-```powershell
 $env:DATABASE_URL = "postgresql+psycopg://mlops:mlops@localhost:5432/monitoring"
+$env:API_TOKEN = "test-token"
+uv run uvicorn app.main:app --host 127.0.0.1 --port 7860
 ```
+
+With this setup, the API writes prediction logs and drift events to the local
+PostgreSQL database. If `DATABASE_URL` is not set, the API still runs but keeps
+monitoring persistence disabled.
 
 The API auto-creates the monitoring tables by default. To manage the schema
 yourself, run `monitoring/schema.sql` manually and set:
@@ -243,14 +246,7 @@ yourself, run `monitoring/schema.sql` manually and set:
 $env:MONITORING_AUTO_CREATE_TABLES = "false"
 ```
 
-Terminal 1:
-
-```powershell
-$env:API_TOKEN = "test-token"
-uv run uvicorn app.main:app --host 127.0.0.1 --port 7860
-```
-
-Terminal 2:
+In another terminal:
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:7860/health

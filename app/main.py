@@ -129,7 +129,7 @@ async def lifespan(app: FastAPI):
     # Initialize drift monitoring
     try:
         if drift_monitor is None:
-            reference_data_path = PROJECT_ROOT / "data" / "processed" / "train_final.csv"
+            reference_data_path = PROJECT_ROOT / "data" / "processed" / "train_final.csv" # Charger les données de référence à partir du chemin spécifié
             drift_monitor = DriftMonitor(
                 str(reference_data_path),
                 prediction_store=prediction_store,
@@ -242,7 +242,7 @@ async def predict(application: CreditApplication) -> PredictionResponse:
             except Exception as exc:
                 logger.warning(f"Failed to persist prediction record: {exc}")
 
-        # Add to drift monitoring
+        # Add to drift monitoring : On ajoute les données de l'application, la prédiction, la probabilité de défaut et la catégorie de risque au moniteur de dérive pour suivre les changements dans les données d'entrée et les prédictions au fil du temps.
         if drift_monitor:
             drift_monitor.add_prediction({
                 **application.model_dump(),

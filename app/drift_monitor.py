@@ -9,6 +9,8 @@ import logging
 from datetime import datetime, timezone
 import json
 
+from app.schemas import TOP_SHAP_FEATURES
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -54,7 +56,6 @@ class DriftMonitor:
         """Add a prediction to the monitoring buffer."""
         self.prediction_buffer.append(prediction_data)
 
-        # Check if we should run drift analysis
         if len(self.prediction_buffer) >= self.batch_size:
             self._check_drift()
 
@@ -98,6 +99,10 @@ class DriftMonitor:
                 current_data=current_data,
                 reference_data=reference_data,
             )
+            drift_summary = self._summarize_evidently_result(
+                drift_result,
+                monitored_features=common_columns,
+            )
 
             event_timestamp = datetime.now(timezone.utc)
 
@@ -106,19 +111,43 @@ class DriftMonitor:
                     "timestamp": event_timestamp.isoformat(),
                     "event": "drift_analysis_completed",
                     "method": "evidently",
+                    "drift_detected": drift_summary["drift_detected"],
+                    "drifted_features": drift_summary["drifted_features"],
+                    "drifted_feature_count": drift_summary["drifted_feature_count"],
+                    "drifted_feature_share": drift_summary["drifted_feature_share"],
                     "batch_size": len(batch_df),
                     "monitored_features": common_columns,
                 })
             )
 
+            for feature in drift_summary["drifted_features"]:
+                self.logger.warning(
+                    json.dumps({
+                        "timestamp": event_timestamp.isoformat(),
+                        "event": "feature_drift_detected",
+                        "feature": feature,
+                        "method": "evidently",
+                    })
+                )
+                self._record_drift_event(
+                    timestamp=event_timestamp,
+                    drift_detected=True,
+                    feature=feature,
+                    method="evidently",
+                    batch_size=len(batch_df),
+                    details={
+                        "drift_score": drift_summary["feature_scores"].get(feature),
+                    },
+                )
+
             self._record_drift_event(
                 timestamp=event_timestamp,
-                drift_detected=False,
+                drift_detected=drift_summary["drift_detected"],
                 method="evidently",
                 batch_size=len(batch_df),
                 details={
                     "monitored_features": common_columns,
-                    "note": "Evidently report executed successfully",
+                    **drift_summary,
                 },
             )
 
@@ -128,8 +157,7 @@ class DriftMonitor:
 
     def _check_drift_manual(self, batch_df: pd.DataFrame):
         """Fallback manual drift detection using KS test."""
-        # Key features to monitor for drift
-        key_features = ['AMT_INCOME_TOTAL', 'AMT_CREDIT', 'DAYS_BIRTH', 'DAYS_EMPLOYED']
+        key_features = list(TOP_SHAP_FEATURES)
 
         drift_detected = False
 
@@ -185,6 +213,86 @@ class DriftMonitor:
             method="manual_ks_test",
             batch_size=len(batch_df),
         )
+
+    def _summarize_evidently_result(
+        self,
+        drift_result: Any,
+        *,
+        monitored_features: list[str],
+    ) -> dict[str, Any]:
+        """Extract a stable drift summary from Evidently's report snapshot."""
+        result_dict = self._evidently_result_to_dict(drift_result)
+        metrics = result_dict.get("metrics", [])
+
+        drifted_feature_count = 0
+        drifted_feature_share = 0.0
+        drifted_features: set[str] = set()
+        feature_scores: dict[str, float] = {}
+
+        for metric in metrics:
+            metric_name = str(metric.get("metric_name", ""))
+            config = metric.get("config") or {}
+            value = metric.get("value")
+
+            if config.get("type") == "evidently:metric_v2:DriftedColumnsCount":
+                if isinstance(value, dict):
+                    drifted_feature_count = int(float(value.get("count") or 0))
+                    drifted_feature_share = float(value.get("share") or 0.0)
+                continue
+
+            feature = config.get("column") or self._feature_from_metric_name(metric_name)
+            if feature not in monitored_features:
+                continue
+
+            score = self._as_float(value)
+            if score is None:
+                continue
+
+            feature_scores[feature] = score
+            if score < self.drift_threshold:
+                drifted_features.add(feature)
+
+        if drifted_features:
+            drift_detected = True
+        else:
+            drift_detected = drifted_feature_count > 0
+
+        return {
+            "drift_detected": drift_detected,
+            "drifted_features": sorted(drifted_features),
+            "drifted_feature_count": max(drifted_feature_count, len(drifted_features)),
+            "drifted_feature_share": drifted_feature_share,
+            "feature_scores": feature_scores,
+        }
+
+    @staticmethod
+    def _evidently_result_to_dict(drift_result: Any) -> dict[str, Any]:
+        if isinstance(drift_result, dict):
+            return drift_result
+        for method_name in ("dict", "dump_dict"):
+            method = getattr(drift_result, method_name, None)
+            if callable(method):
+                return method()
+        json_method = getattr(drift_result, "json", None)
+        if callable(json_method):
+            return json.loads(json_method())
+        return {}
+
+    @staticmethod
+    def _feature_from_metric_name(metric_name: str) -> str | None:
+        prefix = "ValueDrift(column="
+        if not metric_name.startswith(prefix):
+            return None
+        return metric_name.removeprefix(prefix).split(",", maxsplit=1)[0]
+
+    @staticmethod
+    def _as_float(value: Any) -> float | None:
+        if isinstance(value, dict):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     def _record_drift_event(self, **payload: Any):
         prediction_store = getattr(self, "prediction_store", None)
